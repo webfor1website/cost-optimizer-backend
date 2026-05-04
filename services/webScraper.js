@@ -1,7 +1,9 @@
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const UserAgent = require('user-agents');
+const { UserAgent } = require('user-agents');
 const cheerio = require('cheerio');
+const DetectionEvasion = require('./detectionEvasion');
+const ProxyRotation = require('./proxyRotation');
 
 puppeteer.use(StealthPlugin());
 
@@ -9,23 +11,22 @@ class WebScraper {
   constructor() {
     this.browser = null;
     this.userAgent = new UserAgent();
+    this.evasion = new DetectionEvasion();
+    this.proxyRotation = new ProxyRotation();
+    this.currentProxy = null;
   }
 
   async initialize() {
     if (!this.browser) {
-      this.browser = await puppeteer.launch({
-        headless: 'new',
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--no-first-run',
-          '--no-zygote',
-          '--single-process',
-          '--disable-gpu'
-        ]
-      });
+      // Try to get a working proxy
+      this.currentProxy = await this.proxyRotation.getWorkingProxy();
+      
+      // Fall back to Tor if no free proxy works
+      if (!this.currentProxy && await this.proxyRotation.isTorAvailable()) {
+        this.currentProxy = this.proxyRotation.getTorProxy();
+      }
+      
+      this.browser = await this.evasion.createStealthBrowser(puppeteer, this.currentProxy);
     }
   }
 
@@ -92,6 +93,89 @@ class WebScraper {
     }
   }
 
+  async multiEngineSearch(query) {
+    await this.initialize();
+    const page = await this.browser.newPage();
+    const engine = this.evasion.getRandomSearchEngine();
+    
+    try {
+      await this.evasion.applyFingerprint(page, this.evasion.sessionFingerprint);
+      
+      if (engine.name === 'google') {
+        await page.goto('https://www.google.com/search?q=' + encodeURIComponent(query), {
+          waitUntil: 'networkidle2'
+        });
+      } else if (engine.name === 'duckduckgo') {
+        await page.goto('https://duckduckgo.com/', { waitUntil: 'networkidle2' });
+        await this.evasion.simulateMouseMovement(page, 400, 300);
+        await page.click('#searchbox_input');
+        await this.evasion.simulateTyping(page, '#searchbox_input', query);
+        await this.evasion.humanDelay(500, 1500);
+        await page.keyboard.press('Enter');
+        await page.waitForSelector('.result', { timeout: 10000 });
+      } else if (engine.name === 'bing') {
+        await page.goto('https://www.bing.com/search?q=' + encodeURIComponent(query), {
+          waitUntil: 'networkidle2'
+        });
+      }
+      
+      await this.evasion.humanDelay(1000, 3000);
+      await this.evasion.simulateScrolling(page);
+      
+      const results = await this.extractResults(page, engine);
+      
+      return results;
+    } finally {
+      await page.close();
+    }
+  }
+
+  async extractResults(page, engine) {
+    const results = await page.evaluate((engine) => {
+      const searchResults = [];
+      let elements = [];
+      
+      if (engine.name === 'google') {
+        elements = document.querySelectorAll('.g');
+      } else if (engine.name === 'duckduckgo') {
+        elements = document.querySelectorAll('.result');
+      } else if (engine.name === 'bing') {
+        elements = document.querySelectorAll('.b_algo');
+      }
+      
+      elements.forEach(element => {
+        let titleElement, linkElement, snippetElement;
+        
+        if (engine.name === 'google') {
+          titleElement = element.querySelector('h3');
+          linkElement = element.querySelector('a');
+          snippetElement = element.querySelector('.VwiC3b');
+        } else if (engine.name === 'duckduckgo') {
+          titleElement = element.querySelector('.result__a');
+          linkElement = element.querySelector('.result__a');
+          snippetElement = element.querySelector('.result__snippet');
+        } else if (engine.name === 'bing') {
+          titleElement = element.querySelector('h2');
+          linkElement = element.querySelector('h2 a');
+          snippetElement = element.querySelector('.b_caption p');
+        }
+        
+        if (titleElement && linkElement) {
+          searchResults.push({
+            title: titleElement.textContent,
+            url: linkElement.href,
+            snippet: snippetElement ? snippetElement.textContent : '',
+            engine: engine.name
+          });
+        }
+      });
+      
+      return searchResults.slice(0, 10);
+    }, engine);
+    
+    return results;
+  }
+
   async scrapePage(url) {
     await this.initialize();
     const page = await this.browser.newPage();
@@ -137,23 +221,21 @@ class WebScraper {
     }
   }
 
-  async searchAndScrape(query, maxPages = 3) {
-    const searchResults = await this.googleSearch(query);
+  async searchAndScrape(query, numResults = 5) {
+    const searchResults = await this.multiEngineSearch(query);
     const detailedResults = [];
     
-    for (let i = 0; i < Math.min(searchResults.length, maxPages); i++) {
+    for (let i = 0; i < Math.min(numResults, searchResults.length); i++) {
       const result = searchResults[i];
-      const pageData = await this.scrapePage(result.url);
+      const scrapedData = await this.scrapePage(result.url);
       
-      if (pageData) {
-        detailedResults.push({
-          ...result,
-          scrapedData: pageData
-        });
-      }
+      detailedResults.push({
+        ...result,
+        scrapedData: scrapedData
+      });
       
-      // Add delay to avoid rate limiting
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // Add human-like delay between requests
+      await this.evasion.humanDelay(2000, 5000);
     }
     
     return detailedResults;

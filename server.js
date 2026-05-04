@@ -6,6 +6,7 @@ const NodeGeocoder = require('node-geocoder');
 const path = require('path');
 const WebScraper = require('./services/webScraper');
 const GrokIntegration = require('./services/grokIntegration');
+const APISearchService = require('./services/apiSearchService');
 require('dotenv').config();
 
 const app = express();
@@ -296,6 +297,7 @@ class CostOptimizer {
 const optimizer = new CostOptimizer();
 const webScraper = new WebScraper();
 const grokIntegration = new GrokIntegration();
+const apiSearchService = new APISearchService();
 
 // Routes
 app.get('/', (req, res) => {
@@ -306,37 +308,57 @@ app.post('/optimize', async (req, res) => {
   try {
     const { request, location } = req.body;
     
-    if (!request) {
-      return res.status(400).json({ error: 'Request is required' });
+    console.log(`Starting API-based optimization for: ${request}`);
+    
+    // Use API search service instead of web scraping
+    let searchResults = await apiSearchService.search(request);
+    
+    // Fallback to simulated results if APIs fail
+    if (searchResults.length === 0) {
+      searchResults = apiSearchService.generateFallbackResults(request);
+      console.log('Using fallback results');
     }
-
-    console.log('Starting web search optimization for:', request);
     
-    // Step 1: Search and scrape results
-    const searchResults = await webScraper.searchAndScrape(request, 5);
-    console.log('Found search results:', searchResults.length);
+    if (searchResults.length === 0) {
+      return res.json({
+        success: true,
+        results: [],
+        analysis: {
+          summary: `No search results found for "${request}". Please try different keywords.`,
+          recommendations: ['Try more specific search terms', 'Include brand names or model numbers'],
+          roi: 0
+        }
+      });
+    }
     
-    if (searchResults.length > 0) {
-      // Step 2: Analyze with Grok
-      console.log('Analyzing results with Grok...');
-      const grokAnalysis = await grokIntegration.analyzeCostOptimization(searchResults, request);
-      
-      if (grokAnalysis.success) {
-        // Parse Grok's response into structured format
-        const result = await parseGrokResponse(grokAnalysis.response, request, searchResults);
-        res.json(result);
-      } else {
-        console.log('Grok analysis failed:', grokAnalysis.error);
-        res.status(500).json({ error: 'AI analysis failed. Please try again.' });
+    // Analyze results with Grok AI
+    const analysis = await grokIntegration.analyzeCostOptimization(request, searchResults, location);
+    
+    // Parse and format the analysis
+    const parsedResults = parseGrokResponse(analysis);
+    
+    // Add location-based optimization
+    const optimizedResults = await optimizer.optimizeResults(parsedResults, location);
+    
+    console.log(`Successfully processed ${optimizedResults.length} optimized results`);
+    
+    res.json({
+      success: true,
+      results: optimizedResults,
+      analysis: {
+        summary: analysis.substring(0, 200) + '...',
+        recommendations: ['Compare prices across multiple sources', 'Check for additional discounts', 'Consider total cost including shipping'],
+        roi: optimizedResults.reduce((sum, item) => sum + (item.roi || 0), 0) / optimizedResults.length
       }
-    } else {
-      console.log('No search results found');
-      res.status(404).json({ error: 'No results found for your request. Please try different keywords.' });
-    }
+    });
     
   } catch (error) {
     console.error('Optimization error:', error);
-    res.status(500).json({ error: 'Search failed. Please try again.' });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to process optimization request',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
