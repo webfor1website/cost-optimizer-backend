@@ -15,6 +15,7 @@ class WebScraper {
     if (!this.browser) {
       this.browser = await puppeteer.launch({
         headless: 'new',
+        executablePath: process.platform === 'win32' ? undefined : '/usr/bin/google-chrome',
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
